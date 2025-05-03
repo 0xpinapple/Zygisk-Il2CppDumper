@@ -17,6 +17,10 @@
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
 
+
+static const uint8_t* metadataPtrGlobal = nullptr;
+static       size_t   metadataSizeGlobal = 0;
+
 #define DO_API(r, n, p) r (*n) p
 
 #include "il2cpp-api-functions.h"
@@ -427,20 +431,15 @@ void il2cpp_dump(const char *outDir) {
     outStream.close();
     LOGI("dump done!");
 
-    // ─── dump.cs is done here ───────────────────────────────────
-    LOGI("dump done!");
-
-    // ── now dump the raw metadata blob ──────────────────────────
-    extern const uint8_t* metadataPtr;   // pointer found by IL2CppDumper
-    extern       size_t   metadataSize;  // size calculated by IL2CppDumper
-    
-    std::string metaDst = std::string(outDir) + "/files/global-metadata.dat";
-    std::ofstream metaOut(metaDst, std::ios::binary);
-    if (metaOut) {
-        metaOut.write(reinterpret_cast<const char*>(metadataPtr), metadataSize);
-        metaOut.close();
-        LOGI("metadata dumped → %s", metaDst.c_str());
+    // ─── dump the raw global-metadata.dat ───────────────────────────
+    std::string metaOut = std::string(outDir) + "/files/global-metadata.dat";
+    std::ofstream mdf(metaOut, std::ios::binary);
+    if (mdf) {
+        mdf.write(reinterpret_cast<const char*>(metadataPtrGlobal),
+                    metadataSizeGlobal);
+        mdf.close();
+        LOGI("✔ metadata dumped → %s", metaOut.c_str());
     } else {
-        LOGW("failed to open %s for metadata write", metaDst.c_str());
-    }    
+        LOGW("⚠ failed to open %s for metadata dump", metaOut.c_str());
+    }
 }
