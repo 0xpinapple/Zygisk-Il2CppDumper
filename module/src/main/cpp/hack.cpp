@@ -30,6 +30,54 @@ void hack_start(const char *game_data_dir) {
             sleep(1);
         }
     }
+
+    // ── Step 1: scan all loaded modules and pick the one with il2cpp_domain_get ──
+    struct Mod { void* handle; std::string path; };
+    Mod m = { nullptr, "" };
+
+    xdl_iterate(
+        [](xdl_phdr_info* info, size_t, void* data) {
+            Mod* mod = (Mod*)data;
+            // try to dlopen each so
+            void* h = xdl_open(info->dlpi_name, 0);
+            if (!h) return XDL_CONTINUE;
+
+            // check if it really is IL2CPP
+            if (xdl_sym(h, "il2cpp_domain_get")) {
+                mod->handle = h;
+                mod->path   = info->dlpi_name;
+                return XDL_STOP_ITERATE;
+            }
+            xdl_close(h);
+            return XDL_CONTINUE;
+        },
+        &m
+    );
+
+    if (!m.handle) {
+        LOGI("no IL2CPP module found");
+        return;
+    }
+
+    // ── Step 2: dump the .so under its real filename ──
+    Dl_info info;
+    if (dladdr(m.handle, &info) && info.dli_fname) {
+        // extract just the basename, e.g. "libFooGame.so"
+        const char* base = strrchr(info.dli_fname, '/');
+        std::string soName = base ? base+1 : info.dli_fname;
+        std::string dst   = std::string(outDir) + "/files/" + soName;
+
+        std::ifstream  src(info.dli_fname, std::ios::binary);
+        std::ofstream  dstf(dst,               std::ios::binary);
+        dstf << src.rdbuf();
+        LOGI("dumped original so: %s → %s", info.dli_fname, dst.c_str());
+    } else {
+        LOGW("dladdr failed, skipping .so copy");
+    }
+
+    // ── Step 3: initialize IL2CPP and produce dump.cs ──
+    il2cpp_api_init(m.handle);
+    il2cpp_dump(outDir);
     if (!load) {
         LOGI("libil2cpp.so not found in thread %d", gettid());
     }
