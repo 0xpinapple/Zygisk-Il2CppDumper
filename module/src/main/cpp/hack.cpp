@@ -20,13 +20,18 @@
 #include <sys/mman.h>
 #include <linux/unistd.h>
 #include <array>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <iostream>
+#include <cerrno>
 
 struct ModInfo {
     void*       handle;
     const char* path;
 };
 
-// callback for xdl_iterate_phdr: returns non-zero when we’ve found the IL2CPP module
+// callback for xdl_iterate_phdr: returns non-zero when we've found the IL2CPP module
 static int find_il2cpp_cb(struct dl_phdr_info* info, size_t, void* data) {
     ModInfo* m = static_cast<ModInfo*>(data);
 
@@ -65,31 +70,105 @@ void hack_start(const char* game_data_dir) {
         const char* base = basename(const_cast<char*>(dlinfo.dli_fname));
         std::string dst  = std::string(game_data_dir) + "/files/" + base;
 
-        // POSIX copy of dlinfo.dli_fname → dst
-    int srcFd = open(dlinfo.dli_fname, O_RDONLY);
-    if (srcFd < 0) {
-        LOGW("⚠ open src failed: %s", dlinfo.dli_fname);
-    } else {
-        // ensure parent dir exists (game_data_dir/files), or assume it's created elsewhere
-        int dstFd = open(dst.c_str(),
-                        O_CREAT | O_WRONLY | O_TRUNC,
-                        S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
-        if (dstFd < 0) {
-            LOGW("⚠ open dst failed: %s", dst.c_str());
-        } else {
-            char buf[4096];
-            ssize_t n;
-            while ((n = read(srcFd, buf, sizeof(buf))) > 0) {
-                write(dstFd, buf, (size_t)n);
-            }
-            close(dstFd);
-            LOGI("✔ dumped SO: %s → %s", dlinfo.dli_fname, dst.c_str());
-        }
-        close(srcFd);
-    }
+        // Ensure path exists before trying to write
+        std::string dirPath = std::string(game_data_dir) + "/files";
+        mkdir(dirPath.c_str(), 0755);  // Create the directory if it doesn't exist
 
+        // POSIX copy of dlinfo.dli_fname → dst
+        int srcFd = open(dlinfo.dli_fname, O_RDONLY);
+        if (srcFd < 0) {
+            LOGW("⚠ open src failed: %s (error: %s)", dlinfo.dli_fname, strerror(errno));
+            
+            // Try to get the path from /proc/self/maps instead
+            std::ifstream maps("/proc/self/maps");
+            std::string line;
+            std::string il2cpp_path;
+            
+            while (std::getline(maps, line)) {
+                if (line.find("libil2cpp.so") != std::string::npos) {
+                    std::istringstream iss(line);
+                    std::string addr, perms, offset, dev, inode;
+                    iss >> addr >> perms >> offset >> dev >> inode >> il2cpp_path;
+                    break;
+                }
+            }
+            
+            if (!il2cpp_path.empty()) {
+                LOGI("Found IL2CPP path from maps: %s", il2cpp_path.c_str());
+                srcFd = open(il2cpp_path.c_str(), O_RDONLY);
+                if (srcFd < 0) {
+                    LOGW("⚠ open alternative src failed: %s", strerror(errno));
+                }
+            }
+        }
+        
+        if (srcFd >= 0) {
+            // ensure parent dir exists (game_data_dir/files), or assume it's created elsewhere
+            int dstFd = open(dst.c_str(),
+                            O_CREAT | O_WRONLY | O_TRUNC,
+                            S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+            if (dstFd < 0) {
+                LOGW("⚠ open dst failed: %s (error: %s)", dst.c_str(), strerror(errno));
+            } else {
+                char buf[4096];
+                ssize_t n;
+                size_t total = 0;
+                while ((n = read(srcFd, buf, sizeof(buf))) > 0) {
+                    write(dstFd, buf, (size_t)n);
+                    total += n;
+                }
+                close(dstFd);
+                LOGI("✔ dumped SO: %s → %s (size: %zu bytes)", dlinfo.dli_fname, dst.c_str(), total);
+            }
+            close(srcFd);
+        }
     } else {
-        LOGW("⚠ dladdr failed; skipping SO copy");
+        LOGW("⚠ dladdr failed; trying alternative method for SO copy");
+        
+        // Alternative method using /proc/self/maps
+        std::ifstream maps("/proc/self/maps");
+        std::string line;
+        std::string il2cpp_path;
+        
+        while (std::getline(maps, line)) {
+            if (line.find("libil2cpp.so") != std::string::npos) {
+                std::istringstream iss(line);
+                std::string addr, perms, offset, dev, inode;
+                iss >> addr >> perms >> offset >> dev >> inode >> il2cpp_path;
+                break;
+            }
+        }
+        
+        if (!il2cpp_path.empty()) {
+            std::string dst = std::string(game_data_dir) + "/files/libil2cpp.so";
+            
+            // Ensure directory exists
+            std::string dirPath = std::string(game_data_dir) + "/files";
+            mkdir(dirPath.c_str(), 0755);
+            
+            int srcFd = open(il2cpp_path.c_str(), O_RDONLY);
+            if (srcFd < 0) {
+                LOGW("⚠ open alternative src failed: %s", strerror(errno));
+            } else {
+                int dstFd = open(dst.c_str(), O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+                if (dstFd < 0) {
+                    LOGW("⚠ open dst failed: %s (error: %s)", dst.c_str(), strerror(errno));
+                } else {
+                    char buf[4096];
+                    ssize_t n;
+                    size_t total = 0;
+                    while ((n = read(srcFd, buf, sizeof(buf))) > 0) {
+                        write(dstFd, buf, (size_t)n);
+                        total += n;
+                    }
+                    close(dstFd);
+                    LOGI("✔ dumped SO: %s → %s (size: %zu bytes)", il2cpp_path.c_str(), dst.c_str(), total);
+                }
+                close(srcFd);
+            }
+        } else {
+            LOGW("⚠ Could not find libil2cpp.so in process maps");
+        }
     }
 
     // ─── Step 3: init IL2CPP and generate dump.cs ────────────────
