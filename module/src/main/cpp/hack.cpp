@@ -2,6 +2,8 @@
 // Created by Perfare on 2020/7/4.
 //
 
+#include <libgen.h>     // for basename()
+#include <link.h>       // for struct dl_phdr_info
 #include "hack.h"
 #include "il2cpp_dump.h"
 #include "log.h"
@@ -17,71 +19,63 @@
 #include <linux/unistd.h>
 #include <array>
 
-void hack_start(const char *game_data_dir) {
-    bool load = false;
-    for (int i = 0; i < 10; i++) {
-        void *handle = xdl_open("libil2cpp.so", 0);
-        if (handle) {
-            load = true;
-            il2cpp_api_init(handle);
-            il2cpp_dump(game_data_dir);
-            break;
-        } else {
-            sleep(1);
-        }
+struct ModInfo {
+    void*       handle;
+    const char* path;
+};
+
+// callback for xdl_iterate_phdr: returns non-zero when we’ve found the IL2CPP module
+static int find_il2cpp_cb(struct dl_phdr_info* info, size_t, void* data) {
+    ModInfo* m = static_cast<ModInfo*>(data);
+
+    // try opening this module
+    void* h = xdl_open(info->dlpi_name, XDL_DEFAULT);
+    if (!h) 
+        return 0;  // continue iteration
+
+    // look for the key symbol
+    size_t symSize;
+    if (xdl_sym(h, "il2cpp_domain_get", &symSize)) {
+        m->handle = h;
+        m->path   = info->dlpi_name;
+        return 1;  // stop iteration
     }
 
-    // ── Step 1: scan all loaded modules and pick the one with il2cpp_domain_get ──
-    struct Mod { void* handle; std::string path; };
-    Mod m = { nullptr, "" };
+    // not it—close and keep going
+    xdl_close(h);
+    return 0;
+}
 
-    xdl_iterate(
-        [](xdl_phdr_info* info, size_t, void* data) {
-            Mod* mod = (Mod*)data;
-            // try to dlopen each so
-            void* h = xdl_open(info->dlpi_name, 0);
-            if (!h) return XDL_CONTINUE;
-
-            // check if it really is IL2CPP
-            if (xdl_sym(h, "il2cpp_domain_get")) {
-                mod->handle = h;
-                mod->path   = info->dlpi_name;
-                return XDL_STOP_ITERATE;
-            }
-            xdl_close(h);
-            return XDL_CONTINUE;
-        },
-        &m
-    );
+void hack_start(const char* game_data_dir) {
+    // ─── Step 1: find the real IL2CPP module ─────────────────────
+    ModInfo m{ nullptr, nullptr };
+    xdl_iterate_phdr(find_il2cpp_cb, &m, XDL_DEFAULT);
 
     if (!m.handle) {
-        LOGI("no IL2CPP module found");
+        LOGI("❌ could not locate IL2CPP module (tid=%d)", gettid());
         return;
     }
 
-    // ── Step 2: dump the .so under its real filename ──
-    Dl_info info;
-    if (dladdr(m.handle, &info) && info.dli_fname) {
-        // extract just the basename, e.g. "libFooGame.so"
-        const char* base = strrchr(info.dli_fname, '/');
-        std::string soName = base ? base+1 : info.dli_fname;
-        std::string dst   = std::string(outDir) + "/files/" + soName;
+    // ─── Step 2: dump the .so under its real filename ────────────
+    Dl_info dlinfo;
+    if (dladdr(m.handle, &dlinfo) && dlinfo.dli_fname) {
+        // pull out "libFooGame.so"
+        const char* base = basename(const_cast<char*>(dlinfo.dli_fname));
+        std::string dst  = std::string(game_data_dir) + "/files/" + base;
 
-        std::ifstream  src(info.dli_fname, std::ios::binary);
-        std::ofstream  dstf(dst,               std::ios::binary);
-        dstf << src.rdbuf();
-        LOGI("dumped original so: %s → %s", info.dli_fname, dst.c_str());
+        std::ifstream  src(dlinfo.dli_fname, std::ios::binary);
+        std::ofstream  out(dst,                  std::ios::binary);
+        out << src.rdbuf();
+        LOGI("✔ dumped SO: %s → %s", dlinfo.dli_fname, dst.c_str());
     } else {
-        LOGW("dladdr failed, skipping .so copy");
+        LOGW("⚠ dladdr failed; skipping SO copy");
     }
 
-    // ── Step 3: initialize IL2CPP and produce dump.cs ──
+    // ─── Step 3: init IL2CPP and generate dump.cs ────────────────
     il2cpp_api_init(m.handle);
-    il2cpp_dump(outDir);
-    if (!load) {
-        LOGI("libil2cpp.so not found in thread %d", gettid());
-    }
+    il2cpp_dump(game_data_dir);
 }
+
 
 std::string GetLibDir(JavaVM *vms) {
     JNIEnv *env = nullptr;
