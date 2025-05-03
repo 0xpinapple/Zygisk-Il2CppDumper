@@ -12,6 +12,8 @@
 #include <sstream>
 #include <fstream>
 #include <unistd.h>
+#include <cerrno>
+#include <sys/stat.h>
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
@@ -28,6 +30,60 @@ static       size_t   metadataSizeGlobal = 0;
 #undef DO_API
 
 static uint64_t il2cpp_base = 0;
+
+// Function to get the metadata pointer and size
+static void il2cpp_get_metadata(uint8_t** metadata, size_t* size) {
+    // Try to get the metadata pointer and size from il2cpp API
+    if (il2cpp_get_corlib) {
+        Il2CppImage* coreLib = il2cpp_get_corlib();
+        if (coreLib) {
+            *metadata = (uint8_t*)coreLib->metadataHandle;
+            *size = coreLib->metadataLength;
+            LOGI("Metadata found: pointer=%p, size=%zu", *metadata, *size);
+        } else {
+            LOGW("Failed to get corlib image");
+        }
+    } else {
+        LOGW("Failed to get il2cpp_get_corlib function");
+    }
+    
+    // If we couldn't get metadata through API, try another approach
+    if (*metadata == nullptr || *size == 0) {
+        // Attempt to directly access global-metadata.dat in memory
+        Dl_info dlInfo;
+        if (dladdr((void*)il2cpp_domain_get_assemblies, &dlInfo)) {
+            void* handle = dlopen(dlInfo.dli_fname, RTLD_LAZY);
+            if (handle) {
+                void* globalMetadataPtr = dlsym(handle, "g_GlobalMetadata");
+                void* globalMetadataSizePtr = dlsym(handle, "g_GlobalMetadataSize");
+                
+                if (globalMetadataPtr && globalMetadataSizePtr) {
+                    *metadata = *(uint8_t**)globalMetadataPtr;
+                    *size = *(size_t*)globalMetadataSizePtr;
+                    LOGI("Metadata found via global vars: pointer=%p, size=%zu", *metadata, *size);
+                }
+                dlclose(handle);
+            }
+        }
+    }
+    
+    // Try one more method if still not found
+    if (*metadata == nullptr || *size == 0) {
+        void* handle = xdl_open("libil2cpp.so", XDL_DEFAULT);
+        if (handle) {
+            size_t symSize;
+            void* globalMetadataPtr = xdl_sym(handle, "g_MetadataPtr", &symSize);
+            void* globalMetadataSizePtr = xdl_sym(handle, "g_MetadataSize", &symSize);
+            
+            if (globalMetadataPtr && globalMetadataSizePtr) {
+                *metadata = *(uint8_t**)globalMetadataPtr;
+                *size = *(size_t*)globalMetadataSizePtr;
+                LOGI("Metadata found via xdl: pointer=%p, size=%zu", *metadata, *size);
+            }
+            xdl_close(handle);
+        }
+    }
+}
 
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
