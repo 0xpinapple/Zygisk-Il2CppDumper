@@ -2,6 +2,8 @@
 // Created by Perfare on 2020/7/4.
 //
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <libgen.h>     // for basename()
 #include <link.h>       // for struct dl_phdr_info
 #include "hack.h"
@@ -63,10 +65,29 @@ void hack_start(const char* game_data_dir) {
         const char* base = basename(const_cast<char*>(dlinfo.dli_fname));
         std::string dst  = std::string(game_data_dir) + "/files/" + base;
 
-        std::ifstream  src(dlinfo.dli_fname, std::ios::binary);
-        std::ofstream  out(dst,                  std::ios::binary);
-        out << src.rdbuf();
-        LOGI("✔ dumped SO: %s → %s", dlinfo.dli_fname, dst.c_str());
+        // POSIX copy of dlinfo.dli_fname → dst
+    int srcFd = open(dlinfo.dli_fname, O_RDONLY);
+    if (srcFd < 0) {
+        LOGW("⚠ open src failed: %s", dlinfo.dli_fname);
+    } else {
+        // ensure parent dir exists (game_data_dir/files), or assume it's created elsewhere
+        int dstFd = open(dst.c_str(),
+                        O_CREAT | O_WRONLY | O_TRUNC,
+                        S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+        if (dstFd < 0) {
+            LOGW("⚠ open dst failed: %s", dst.c_str());
+        } else {
+            char buf[4096];
+            ssize_t n;
+            while ((n = read(srcFd, buf, sizeof(buf))) > 0) {
+                write(dstFd, buf, (size_t)n);
+            }
+            close(dstFd);
+            LOGI("✔ dumped SO: %s → %s", dlinfo.dli_fname, dst.c_str());
+        }
+        close(srcFd);
+    }
+
     } else {
         LOGW("⚠ dladdr failed; skipping SO copy");
     }
